@@ -1,3 +1,5 @@
+import datetime
+
 from fastapi import APIRouter
 from faker import Faker
 from app.models.person import PersonResponse
@@ -17,7 +19,7 @@ async def get_person():
         phone_number=faker.phone_number(),
         registration_date=faker.date_time_between(start_date="-1y", end_date="now"),
         created_at=faker.date_time_between(start_date="-1y", end_date="now"),
-        updated_at=faker.date_time_between(start_date="-1y", end_date="now"),
+        updated_at=datetime.datetime.now(),
         deleted_at=None,
     )
     return person

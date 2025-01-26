@@ -1,5 +1,53 @@
 services:
+  pg:
+    image: postgres:latest
+    container_name: pg
+    env_file:
+      - ./.env
+    environment:
+      - POSTGRES_PASSWORD=${PG_PASSWORD}
+      - POSTGRES_USER=${PG_USER}
+      - POSTGRES_DB=${PG_DATABASE}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: /usr/bin/pg_isready
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    volumes:
+      - ./init/pg:/docker-entrypoint-initdb.d
+
+  zookeeper:
+    image: zookeeper:latest
+    container_name: zookeeper
+    hostname: zookeeper
+
+  ch:
+    image: clickhouse/clickhouse-server:latest
+    container_name: ch
+    hostname: ch
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./data/clickhouse/node1:/etc/clickhouse-server
+      - ./data/clickhouse:/docker-entrypoint-initdb.d
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: wget --no-verbose --tries=1 http://127.0.0.1:8123/ping || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
   faker-api:
     build: fakerApi
     ports:
       - "8000:8000"
+    depends_on:
+      pg:
+        condition: service_healthy
+      ch:
+        condition: service_healthy

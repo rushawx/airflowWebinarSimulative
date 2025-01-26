@@ -83,7 +83,7 @@ pre-commit install
 SHELL := /bin/bash
 PY = .venv/bin/python
 
-.PHONY: up-services down-services up-db down-db up-af down-af lint
+.PHONY: up-services down-services up-af down-af lint
 
 lint:
 	pre-commit run --all-files
@@ -94,12 +94,6 @@ up-services:
 
 down-services:
 	docker-compose -f docker-compose-services.yaml down -v
-
-up-db:
-	docker-compose -f docker-compose-db.yaml up -d --build
-
-down-db:
-	docker-compose -f docker-compose-db.yaml down -v
 
 up-af:
 	docker-compose -f docker-compose-af.yaml up -d --build
@@ -245,40 +239,14 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 ```
 
-Напишем `docker-compose-services.yaml` для нашего сервиса
+`docker-compose-services.yaml` напишем в следующем пункте
+
+## 3. Поднимем инстансы Postgres, Clickhouse и fakerApi
+
+Напишем `docker-compose-services.yaml`
 
 ```bash
 # docker-compose-services.yaml
-
-services:
-  faker-api:
-    build: fakerApi
-    ports:
-      - "8000:8000"
-```
-
-Запустим наш сервис в Docker контейнере с помощью команды `Makefile`
-
-```bash
-make up-services
-```
-
-Проверим работу нашего приложения через
-
-```bash
-curl localhost:8000/person/
-
-# {"name":"Миронова Полина Филипповна","age":85,"address":"д. Цимлянск, алл. Пограничная, д. 160 к. 49, 523868","email":"novikoveduard@example.com","phone_number":"8 (986) 389-0428","registration_date":"2024-04-23T18:33:50.346207","created_at":"2024-08-01T05:22:00.539628","updated_at":"2024-06-25T02:19:17.921913","deleted_at":null}
-```
-
-Все в порядке, наш сервис по генерации фейковых пользователей готов
-
-## 3. Поднимем инстансы Postgres и Clickhouse
-
-Напишем `docker-compose-db.yaml`
-
-```bash
-# docker-compose-db.yaml
 
 services:
   pg:
@@ -298,6 +266,8 @@ services:
       timeout: 10s
       retries: 5
     restart: unless-stopped
+    volumes:
+      - ./init/pg:/docker-entrypoint-initdb.d
 
   zookeeper:
     image: zookeeper:latest
@@ -321,6 +291,16 @@ services:
       interval: 10s
       timeout: 10s
       retries: 5
+
+  faker-api:
+    build: fakerApi
+    ports:
+      - "8000:8000"
+    depends_on:
+      pg:
+        condition: service_healthy
+      ch:
+        condition: service_healthy
 ```
 
 Создадим вспомогательные для инициализации Postgres директории и файлы
@@ -360,6 +340,8 @@ mkdir data/clickhouse
 mkdir data/clickhouse/node1
 touch data/clickhouse/node1/config.xml
 touch data/clickhouse/node1/users.xml
+mkdir init/ch
+touch init/ch/db.sql
 ```
 
 Заполним вспомогательные файлы содержимым
@@ -486,13 +468,35 @@ touch data/clickhouse/node1/users.xml
 </company>
 ```
 
-Запустим наши инстансы Postgres и Clickhouse с помощью команды `Makefile`
+Создадим файл для инициализации целевой таблицы, который будет исполняться при создании контейнера с Clickhouse
 
-```bash
-make up-db
+```sql
+-- init/ch/db.sql
+
+create table if not exists person_count_by_city (
+    city String,
+    name Int64
+)
+engine = MergeTree()
+primary key city
+order by city;
 ```
 
-Проверим работоспособность через IDE (dbeaver / datagrip)
+Запустим наши инстансы Postgres, Clickhouse и fakerApi с помощью команды `Makefile`
+
+```bash
+make up-services
+```
+
+Проверим работоспособность через IDE (dbeaver / datagrip) и curl
+
+```bash
+curl localhost:8000/person/
+
+# {"name":"Миронова Полина Филипповна","age":85,"address":"д. Цимлянск, алл. Пограничная, д. 160 к. 49, 523868","email":"novikoveduard@example.com","phone_number":"8 (986) 389-0428","registration_date":"2024-04-23T18:33:50.346207","created_at":"2024-08-01T05:22:00.539628","updated_at":"2024-06-25T02:19:17.921913","deleted_at":null}
+```
+
+Все в порядке, наш сервис по генерации пользователей готов
 
 ## 4. Поднимем инстанс Airflow
 
@@ -532,7 +536,7 @@ ch:
   schema: default
   login: default
   password: password
-  port: 8123
+  port: 9000
 
 faker:
   conn_type: http
@@ -573,7 +577,7 @@ make up-af
 
 ![airflow_ui_dags.png](images/airflow_ui_dags.png)
 
-## 5. Напишем наш первый DAG
+## 5. Напишем наш первый DAG с использованием PythonOperator, TaskGroup, XCOM
 
 Напишем DAG, в рамках которого будет происходить обращение к нашему сервису `fakerApi` для получения данных о пользователе, которые затем будут загружаться в Postgres
 
@@ -657,3 +661,222 @@ with DAG(
 
     hello >> main >> goodbye
 ```
+
+С помощью UI мы можем видеть визуальное отображение нашего DAG, включающего Task Group
+![airflow_ui_basic_dag.png](images/airflow_ui_basic_dag.png)
+
+## 5. Напишем продолжение нашего ETL процесса с использованием Dynamic Task Mapping, SQL Sensor
+
+Напишем DAG, в рамках которого будет проверяться исходная таблица в Postgres на наличие новых данных, динамически создаваться задачи для обработки новых данных с последующей их агрегацией и загрузкой в Clickhouse
+
+```bash
+touch airflow/dags/simulative_example_advanced_dag.py
+```
+
+```python
+# airflow/dags/simulative_example_advanced_dag.py
+
+import datetime
+
+from airflow.decorators import task, task_group
+from airflow.providers.common.sql.sensors.sql import SqlSensor
+from airflow.models.dag import DAG
+
+
+with DAG(
+    dag_id="simulative_example_advanced_dag",
+    schedule="@daily",
+    start_date=datetime.datetime(2025, 1, 1),
+    catchup=False,
+    tags=["simulative"],
+) as dag:
+
+    @task
+    def print_hello():
+        print("Hello, Simulative!")
+
+    @task
+    def check_pg_for_new_data(ti):
+        import time
+        import sqlalchemy
+        import psycopg2.extras
+        from airflow.hooks.base import BaseHook
+
+        query = "select min(updated_at) as dt from public.person where updated_at >= now() - interval '1 minute';"
+
+        pg_conn = BaseHook.get_connection("postgres")
+
+        dsn = f"postgresql://{pg_conn.login}:{pg_conn.password}@{pg_conn.host}"
+        dsn += f":{pg_conn.port}/{pg_conn.schema}"
+
+        pg_engine = sqlalchemy.create_engine(dsn)
+
+        conn = pg_engine.raw_connection()
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            while True:
+                cur.execute(query)
+                data = cur.fetchone()
+                if data["dt"] is None:
+                    print("No new data")
+                    time.sleep(5)
+                    continue
+                else:
+                    print(f"New data: {data['dt']}")
+                    ti.xcom_push(key="dt", value=data["dt"])
+                    return True
+
+    @task
+    def get_data_from_pg(ti):
+        import sqlalchemy
+        import pandas as pd
+        import psycopg2.extras
+        from airflow.hooks.base import BaseHook
+
+        dt = ti.xcom_pull(key="dt")
+
+        pg_conn = BaseHook.get_connection("postgres")
+
+        dsn = f"postgresql://{pg_conn.login}:{pg_conn.password}@{pg_conn.host}"
+        dsn += f":{pg_conn.port}/{pg_conn.schema}"
+
+        pg_engine = sqlalchemy.create_engine(dsn)
+
+        conn = pg_engine.raw_connection()
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"select * from public.person where updated_at >= '{dt}';")
+            data = cur.fetchall()
+
+        df = pd.DataFrame(data)
+
+        print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+
+        print(df.columns)
+
+        df["id"] = df["id"].astype(str)
+        df["city"] = df.apply(lambda row: row["address"].split(",")[0], axis=1)
+
+        output = []
+
+        for city in df["city"].unique():
+            output.append(df[df["city"] == city].to_json(date_format="iso"))
+
+        print(f"Got {len(output)} groups of rows from PostgreSQL. Table: person")
+
+        return output
+
+    @task_group(group_id="transform_data_and_aggregate")
+    def transform_data_and_aggregate(data):
+
+        @task
+        def transform_data(data):
+            import json
+            import pandas as pd
+
+            data = json.loads(data)
+
+            df = pd.DataFrame(data)
+
+            print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+
+            df = (
+                df.groupby("city")
+                .agg({"name": "count"})
+                .reset_index()
+                .to_dict(orient="records")
+            )
+
+            print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
+
+            return df
+
+        @task
+        def aggregate_data(data):
+            import pandas as pd
+
+            dfs = []
+
+            for sample in data:
+                dfs.append(pd.DataFrame.from_dict(sample, orient="index").T)
+
+            df = pd.concat(dfs)
+
+            print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+
+            return df.to_json(date_format="iso")
+
+        t = transform_data(data)
+
+        a = aggregate_data(t)
+
+        return a
+
+    @task
+    def load_data_to_ch(data):
+        import json
+        import pandas as pd
+        from clickhouse_driver import Client
+        from airflow.hooks.base import BaseHook
+
+        ch_conn = BaseHook.get_connection("ch")
+
+        client = Client(
+            host=ch_conn.host,
+            port=ch_conn.port,
+            database=ch_conn.schema,
+            user=ch_conn.login,
+            password=ch_conn.password,
+        )
+
+        xcom_data = list(data)
+
+        dfs = []
+
+        for sample in xcom_data:
+            json_data = json.loads(sample)
+            df = pd.DataFrame.from_dict(json_data, orient="index").T
+            dfs.append(df)
+
+        df = pd.concat(dfs)
+
+        client.insert_dataframe(
+            "INSERT INTO person_count_by_city VALUES", df, settings={"use_numpy": True}
+        )
+
+        print(f"Loaded {len(df)} rows to ClickHouse. Table: person_count_by_city")
+
+    @task
+    def say_goodbye():
+        print("Goodbye, Simulative!")
+
+    ph = print_hello()
+
+    s = check_pg_for_new_data()
+
+    e = get_data_from_pg()
+
+    ta = transform_data_and_aggregate.expand(data=e)
+
+    l = load_data_to_ch(ta)
+
+    sg = say_goodbye()
+
+    ph >> s >> e >> ta >> l >> sg
+```
+
+С помощью UI мы можем видеть визуальное отображение нашего DAG
+![airflow_ui_advanced_dag.png](images/airflow_ui_advanced_dag.png)
+
+## 6. Пушим наши наработки на удаленный репозиторий
+
+```bash
+git remote add origin git@github.com:rushawx/airflowWebinarSimulative.git
+git add .
+git commit -m 'init'
+git push --set-upstream origin main
+```
+
+Возможно `git add .` и `git commit -m 'init'` потребуется выполнить дважды из-за специфики работы pre-commit.
+
+Все, поздравляю, вы прекрасны!

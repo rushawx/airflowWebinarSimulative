@@ -9,6 +9,7 @@ with DAG(
     schedule="@daily",
     start_date=datetime.datetime(2025, 1, 1),
     catchup=False,
+    tags=["simulative"],
 ) as dag:
 
     @task

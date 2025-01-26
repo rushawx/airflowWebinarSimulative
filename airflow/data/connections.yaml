@@ -12,7 +12,7 @@ ch:
   schema: default
   login: default
   password: password
-  port: 8123
+  port: 9000
 
 faker:
   conn_type: http
