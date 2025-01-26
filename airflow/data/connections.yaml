@@ -1,0 +1,15 @@
+postgres:
+  conn_type: postgres
+  host: pg
+  schema: db
+  login: postgres
+  password: password
+  port: 5432
+
+ch:
+  conn_type: clickhouse
+  host: ch
+  schema: default
+  login: default
+  password: password
+  port: 8123
