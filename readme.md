@@ -665,7 +665,7 @@ with DAG(
 С помощью UI мы можем видеть визуальное отображение нашего DAG, включающего Task Group
 ![airflow_ui_basic_dag.png](images/airflow_ui_basic_dag.png)
 
-## 5. Напишем продолжение нашего ETL процесса с использованием Dynamic Task Mapping, SQL Sensor
+## 5. Напишем продолжение нашего ETL процесса с использованием Dynamic Task Mapping
 
 Напишем DAG, в рамках которого будет проверяться исходная таблица в Postgres на наличие новых данных, динамически создаваться задачи для обработки новых данных с последующей их агрегацией и загрузкой в Clickhouse
 
@@ -679,7 +679,6 @@ touch airflow/dags/simulative_example_advanced_dag.py
 import datetime
 
 from airflow.decorators import task, task_group
-from airflow.providers.common.sql.sensors.sql import SqlSensor
 from airflow.models.dag import DAG
 
 
@@ -702,7 +701,8 @@ with DAG(
         import psycopg2.extras
         from airflow.hooks.base import BaseHook
 
-        query = "select min(updated_at) as dt from public.person where updated_at >= now() - interval '1 minute';"
+        query = "select min(updated_at) as dt from public.person"
+        query += " where updated_at >= now() - interval '1 minute';"
 
         pg_conn = BaseHook.get_connection("postgres")
 
@@ -780,12 +780,7 @@ with DAG(
 
             print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
-            df = (
-                df.groupby("city")
-                .agg({"name": "count"})
-                .reset_index()
-                .to_dict(orient="records")
-            )
+            df = df.groupby("city").agg({"name": "count"}).reset_index().to_dict(orient="records")
 
             print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
 
@@ -852,17 +847,17 @@ with DAG(
 
     ph = print_hello()
 
-    s = check_pg_for_new_data()
+    sensor = check_pg_for_new_data()
 
-    e = get_data_from_pg()
+    extract = get_data_from_pg()
 
-    ta = transform_data_and_aggregate.expand(data=e)
+    transform = transform_data_and_aggregate.expand(data=extract)
 
-    l = load_data_to_ch(ta)
+    load = load_data_to_ch(transform)
 
     sg = say_goodbye()
 
-    ph >> s >> e >> ta >> l >> sg
+    ph >> sensor >> extract >> transform >> load >> sg
 ```
 
 С помощью UI мы можем видеть визуальное отображение нашего DAG
