@@ -16,6 +16,8 @@ services:
       timeout: 10s
       retries: 5
     restart: unless-stopped
+    volumes:
+      - ./init/pg:/docker-entrypoint-initdb.d
 
   zookeeper:
     image: zookeeper:latest

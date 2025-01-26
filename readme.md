@@ -323,7 +323,36 @@ services:
       retries: 5
 ```
 
-Создадим вспомогательные для инициализации Clickhouse директории и файлы
+Создадим вспомогательные для инициализации Postgres директории и файлы
+
+```bash
+mkdir init
+mkdir init/pg
+touch init/pg/db.sql
+```
+
+Создадим файл для инициализации целевой таблицы, который будет исполняться при создании контейнера с Postgres
+
+```sql
+-- init/pg/db.sql
+
+create extension if not exists "uuid-ossp";
+
+create table if not exists person (
+    id uuid default uuid_generate_v4() primary key,
+    name varchar(256),
+    age integer,
+    address varchar(256),
+    email varchar(256),
+    phone_number varchar(256),
+    registration_date timestamp with time zone,
+    created_at timestamp with time zone,
+    updated_at timestamp with time zone,
+    deleted_at timestamp with time zone
+);
+```
+
+Теперь cоздадим вспомогательные для инициализации Clickhouse директории и файлы
 
 ```bash
 mkdir data
@@ -504,6 +533,12 @@ ch:
   login: default
   password: password
   port: 8123
+
+faker:
+  conn_type: http
+  host: faker-api
+  schema: http
+  port: 8000
 ```
 
 Внесем небольшое изменение в `docker-compose-af.yaml`
@@ -512,6 +547,10 @@ ch:
 # docker-compose-af.yaml
 
 # line ~75
+  environment:
+    ...
+    AIRFLOW__SECRETS__BACKEND: airflow.secrets.local_filesystem.LocalFilesystemBackend
+    AIRFLOW__SECRETS__BACKEND_KWARGS: '{"connections_file_path": "/opt/airflow/data/connections.yaml"}'
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -530,6 +569,20 @@ make up-af
 
 ![airflow_ui.png](images/airflow_ui.png)
 
-Залогинившись, мы попадем на дашборд ДАГов, которые созданы в Airflow. В данном случае это ДАГи-примеры реализации различного функционала Airflow.
+Залогинившись, мы попадем на дашборд ДАГов, которые созданы в Airflow. В данном случае это ДАГи-примеры реализации различного функционала Airflow
 
 ![airflow_ui_dags.png](images/airflow_ui_dags.png)
+
+## 5. Напишем наш первый DAG
+
+Напишем DAG, в рамках которого будет происходить обращение к нашему сервису `fakerApi` для получения данных о пользователе, которые затем будут загружаться в Postgres
+
+```bash
+touch airflow/dags/simulative_example_basic_dag.py
+```
+
+```python
+# airflow/dags/simulative_example_basic_dag.py
+
+
+```

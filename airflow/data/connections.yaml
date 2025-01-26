@@ -1,9 +1,9 @@
 postgres:
   conn_type: postgres
   host: pg
-  schema: db
+  schema: postgres
   login: postgres
-  password: password
+  password: postgres
   port: 5432
 
 ch:
@@ -13,3 +13,9 @@ ch:
   login: default
   password: password
   port: 8123
+
+faker:
+  conn_type: http
+  host: faker-api
+  schema: http
+  port: 8000
