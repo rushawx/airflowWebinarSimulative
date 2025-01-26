@@ -48,7 +48,7 @@ repos:
         args: ["--unsafe"]
       - id: check-symlinks
       - id: check-added-large-files
-        args: ["--maxkb=500"]
+        args: ["--maxkb=3000"]
       - id: requirements-txt-fixer
       - id: detect-private-key
 
