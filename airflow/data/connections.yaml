@@ -10,8 +10,8 @@ ch:
   conn_type: clickhouse
   host: ch
   schema: default
-  login: default
-  password: password
+  login: admin
+  password: "123"
   port: 9000
 
 faker:
@@ -19,3 +19,9 @@ faker:
   host: faker-api
   schema: http
   port: 8000
+
+minio:
+  conn_type: aws
+  login: minioadmin
+  password: minioadmin
+  extra: {"endpoint_url": "minio:9000", "region_name": "us-east-1"}

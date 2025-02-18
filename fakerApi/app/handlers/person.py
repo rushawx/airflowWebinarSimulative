@@ -12,6 +12,7 @@ faker = Faker(locale="ru_RU")
 @router.get("/", response_model=PersonResponse)
 async def get_person():
     person = PersonResponse(
+        id=faker.uuid4(),
         name=faker.name(),
         age=faker.random_int(min=18, max=99),
         address=faker.address(),

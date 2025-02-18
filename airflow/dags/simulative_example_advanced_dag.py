@@ -54,6 +54,20 @@ with DAG(
         import pandas as pd
         import psycopg2.extras
         from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+        from io import BytesIO
+
+        minio_conn = BaseHook.get_connection("minio")
+
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+        minio_client = Minio(
+            endpoint_url, access_key=minio_conn.login, secret_key=minio_conn.password, secure=False
+        )
+
+        if not minio_client.bucket_exists("mybucket"):
+            minio_client.make_bucket("mybucket")
 
         dt = ti.xcom_pull(key="dt")
 
@@ -82,7 +96,15 @@ with DAG(
         output = []
 
         for city in df["city"].unique():
-            output.append(df[df["city"] == city].to_json(date_format="iso"))
+            output.append(city)
+            data = df[df["city"] == city].to_json(date_format="iso")
+            data_json = json.dumps(data).encode("utf-8")
+            data_stream = BytesIO(data_json)
+            minio_client.put_object(
+                "mybucket", city, data_stream, len(data_json), content_type="application/json"
+            )
+
+        ti.xcom_push(key="mydata", value=output)
 
         print(f"Got {len(output)} groups of rows from PostgreSQL. Table: person")
 
@@ -92,13 +114,34 @@ with DAG(
     def transform_data_and_aggregate(data):
 
         @task
-        def transform_data(data):
-            import json
+        def transform_data(input):
             import pandas as pd
+            from airflow.hooks.base import BaseHook
+            from minio import Minio
+            import json
+            from io import BytesIO
 
-            data = json.loads(data)
+            minio_conn = BaseHook.get_connection("minio")
 
-            df = pd.DataFrame(data)
+            endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+            minio_client = Minio(
+                endpoint_url,
+                access_key=minio_conn.login,
+                secret_key=minio_conn.password,
+                secure=False,
+            )
+
+            item = minio_client.get_object("mybucket", input)
+
+            json_data = json.loads(item.read().decode("utf-8"))
+            json_data = json.loads(json_data)
+
+            print(json_data)
+
+            print(type(json_data))
+
+            df = pd.DataFrame.from_dict(json_data, orient="index").T
 
             print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
@@ -106,22 +149,60 @@ with DAG(
 
             print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
 
-            return df
+            output = df
+            data_json = json.dumps(output).encode("utf-8")
+            data_stream = BytesIO(data_json)
+            minio_client.put_object(
+                "mybucket",
+                f"{input}_groupped",
+                data_stream,
+                len(data_json),
+                content_type="application/json",
+            )
+
+            return f"{input}_groupped"
 
         @task
-        def aggregate_data(data):
+        def aggregate_data(input):
             import pandas as pd
+            from airflow.hooks.base import BaseHook
+            from minio import Minio
+            import json
+            from io import BytesIO
 
-            dfs = []
+            minio_conn = BaseHook.get_connection("minio")
 
-            for sample in data:
-                dfs.append(pd.DataFrame.from_dict(sample, orient="index").T)
+            endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
 
-            df = pd.concat(dfs)
+            minio_client = Minio(
+                endpoint_url,
+                access_key=minio_conn.login,
+                secret_key=minio_conn.password,
+                secure=False,
+            )
+
+            print(input)
+
+            local_data = minio_client.get_object("mybucket", input)
+
+            json_data = json.load(BytesIO(local_data.read()))
+
+            df = pd.DataFrame(json_data)
 
             print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
-            return df.to_json(date_format="iso")
+            output = df.to_json(date_format="iso")
+            data_json = json.dumps(output).encode("utf-8")
+            data_stream = BytesIO(data_json)
+            minio_client.put_object(
+                "mybucket",
+                f"{input}_final",
+                data_stream,
+                len(data_json),
+                content_type="application/json",
+            )
+
+            return f"{input}_final"
 
         t = transform_data(data)
 
@@ -130,11 +211,20 @@ with DAG(
         return a
 
     @task
-    def load_data_to_ch(data):
-        import json
+    def load_data_to_ch(input):
         import pandas as pd
         from clickhouse_driver import Client
         from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+
+        minio_conn = BaseHook.get_connection("minio")
+
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+        minio_client = Minio(
+            endpoint_url, access_key=minio_conn.login, secret_key=minio_conn.password, secure=False
+        )
 
         ch_conn = BaseHook.get_connection("ch")
 
@@ -146,14 +236,16 @@ with DAG(
             password=ch_conn.password,
         )
 
-        xcom_data = list(data)
+        xcom_data = list(input)
 
         dfs = []
 
         for sample in xcom_data:
-            json_data = json.loads(sample)
-            df = pd.DataFrame.from_dict(json_data, orient="index").T
-            dfs.append(df)
+            data = minio_client.get_object("mybucket", sample)
+            json_data = json.loads(data.read().decode("utf-8"))
+            json_data = json.loads(json_data)
+            df_local = pd.DataFrame(json_data)
+            dfs.append(df_local)
 
         df = pd.concat(dfs)
 
