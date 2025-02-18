@@ -107,12 +107,12 @@ down-af:
 ```bash
 # .env
 
-PG_HOST=pg
+PG_HOST=localhost
 PG_PORT=5432
 PG_USER=postgres
 PG_PASSWORD=postgres
 PG_DATABASE=postgres
-CH_HOST=ch
+CH_HOST=localhost
 CH_PORT=8123
 CH_USER=default
 CH_PASSWORD=password
@@ -120,6 +120,7 @@ CH_DATABASE=default
 AIRFLOW_UID=50000
 AIRFLOW_GID=0
 AIRFLOW_PROJ_DIR=./airflow
+_PIP_ADDITIONAL_REQUIREMENTS='clickhouse-driver==0.2.9 minio'
 ```
 
 ## 2. Напишем сервис на FastAPI, который будет генерировать фейковых пользователей
@@ -170,11 +171,14 @@ touch app/app.py
 # fakerApi/app/models/person.py
 
 import datetime
+import uuid
+
 from pydantic import BaseModel
 from typing import Optional
 
 
 class PersonResponse(BaseModel):
+    id: uuid.UUID
     name: str
     age: int
     address: str
@@ -184,12 +188,15 @@ class PersonResponse(BaseModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     deleted_at: Optional[datetime.datetime] = None
+
 ```
 
 Напишем обработчик запроса к нашему приложению
 
 ```python
 # fakerApi/app/handlers/person.py
+
+import datetime
 
 from fastapi import APIRouter
 from faker import Faker
@@ -203,6 +210,7 @@ faker = Faker(locale="ru_RU")
 @router.get("/", response_model=PersonResponse)
 async def get_person():
     person = PersonResponse(
+        id=faker.uuid4(),
         name=faker.name(),
         age=faker.random_int(min=18, max=99),
         address=faker.address(),
@@ -210,7 +218,7 @@ async def get_person():
         phone_number=faker.phone_number(),
         registration_date=faker.date_time_between(start_date="-1y", end_date="now"),
         created_at=faker.date_time_between(start_date="-1y", end_date="now"),
-        updated_at=faker.date_time_between(start_date="-1y", end_date="now"),
+        updated_at=datetime.datetime.now(),
         deleted_at=None,
     )
     return person
@@ -241,7 +249,7 @@ if __name__ == "__main__":
 
 `docker-compose-services.yaml` напишем в следующем пункте
 
-## 3. Поднимем инстансы Postgres, Clickhouse и fakerApi
+## 3. Поднимем инстансы Postgres, Clickhouse, Minio и fakerApi
 
 Напишем `docker-compose-services.yaml`
 
@@ -275,7 +283,7 @@ services:
     hostname: zookeeper
 
   ch:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24-alpine
     container_name: ch
     hostname: ch
     ports:
@@ -283,7 +291,7 @@ services:
       - "9000:9000"
     volumes:
       - ./data/clickhouse/node1:/etc/clickhouse-server
-      - ./data/clickhouse:/docker-entrypoint-initdb.d
+      - ./init/ch:/docker-entrypoint-initdb.d
     depends_on:
       - zookeeper
     healthcheck:
@@ -291,6 +299,23 @@ services:
       interval: 10s
       timeout: 10s
       retries: 5
+
+  minio:
+    image: quay.io/minio/minio
+    command: server /minio_data --console-address ":9001"
+    ports:
+      - "9001:9000"  # Remap MinIO API port
+      - "9002:9001"  # Remap MinIO Console port
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9002/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
   faker-api:
     build: fakerApi
@@ -301,6 +326,9 @@ services:
         condition: service_healthy
       ch:
         condition: service_healthy
+
+volumes:
+  minio_data:
 ```
 
 Создадим вспомогательные для инициализации Postgres директории и файлы
@@ -482,7 +510,7 @@ primary key city
 order by city;
 ```
 
-Запустим наши инстансы Postgres, Clickhouse и fakerApi с помощью команды `Makefile`
+Запустим наши инстансы Postgres, Clickhouse, Minio и fakerApi с помощью команды `Makefile`
 
 ```bash
 make up-services
@@ -525,17 +553,17 @@ touch airflow/data/connections.yaml
 postgres:
   conn_type: postgres
   host: pg
-  schema: db
+  schema: postgres
   login: postgres
-  password: password
+  password: postgres
   port: 5432
 
 ch:
   conn_type: clickhouse
   host: ch
   schema: default
-  login: default
-  password: password
+  login: admin
+  password: "123"
   port: 9000
 
 faker:
@@ -543,6 +571,12 @@ faker:
   host: faker-api
   schema: http
   port: 8000
+
+minio:
+  conn_type: aws
+  login: minioadmin
+  password: minioadmin
+  extra: {"endpoint_url": "minio:9000", "region_name": "us-east-1"}
 ```
 
 Внесем небольшое изменение в `docker-compose-af.yaml`
@@ -595,10 +629,11 @@ from airflow.models.dag import DAG
 
 
 with DAG(
-    dag_id="simulative_example_basic_dag",
+    dag_id="simulative_example_dag",
     schedule="@daily",
     start_date=datetime.datetime(2025, 1, 1),
     catchup=False,
+    tags=["simulative"],
 ) as dag:
 
     @task
@@ -611,6 +646,23 @@ with DAG(
         def read_data_from_faker_api(ti):
             import requests
             from airflow.hooks.base import BaseHook
+            from minio import Minio
+            import json
+            from io import BytesIO
+
+            minio_conn = BaseHook.get_connection("minio")
+
+            endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+            minio_client = Minio(
+                endpoint_url,
+                access_key=minio_conn.login,
+                secret_key=minio_conn.password,
+                secure=False,
+            )
+
+            if not minio_client.bucket_exists("mybucket"):
+                minio_client.make_bucket("mybucket")
 
             faker_api_conn = BaseHook.get_connection("faker")
 
@@ -618,7 +670,16 @@ with DAG(
 
             if response.status_code == 200:
                 data = response.json()
-                ti.xcom_push(key="data", value=data)
+                data_json = json.dumps(data).encode("utf-8")
+                data_stream = BytesIO(data_json)
+                minio_client.put_object(
+                    "mybucket",
+                    data["id"],
+                    data_stream,
+                    len(data_json),
+                    content_type="application/json",
+                )
+                ti.xcom_push(key="mydata", value=data["id"])
             else:
                 print(f"Error: {response.status_code}")
 
@@ -627,9 +688,27 @@ with DAG(
             import pandas as pd
             import sqlalchemy
             from airflow.hooks.base import BaseHook
+            from minio import Minio
+            import json
+            from io import BytesIO
 
-            data = ti.xcom_pull(key="data")
-            print(data)
+            data_id = ti.xcom_pull(key="mydata")
+            print(data_id)
+
+            minio_conn = BaseHook.get_connection("minio")
+
+            endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+            minio_client = Minio(
+                endpoint_url,
+                access_key=minio_conn.login,
+                secret_key=minio_conn.password,
+                secure=False,
+            )
+
+            data = minio_client.get_object("mybucket", data_id)
+
+            json_data = json.load(BytesIO(data.read()))
 
             pg_conn = BaseHook.get_connection("postgres")
 
@@ -638,7 +717,7 @@ with DAG(
 
             pg_engine = sqlalchemy.create_engine(dsn)
 
-            df = pd.DataFrame.from_dict(data, orient="index").T
+            df = pd.DataFrame.from_dict(json_data, orient="index").T
 
             df.to_sql("person", pg_engine, if_exists="append", index=False)
             print(f"Loaded {len(df)} rows to PostgreSQL. Table: person")
@@ -667,7 +746,7 @@ with DAG(
 
 ## 5. Напишем продолжение нашего ETL процесса с использованием Dynamic Task Mapping
 
-Напишем DAG, в рамках которого будет проверяться исходная таблица в Postgres на наличие новых данных, динамически создаваться задачи для обработки новых данных с последующей их агрегацией и загрузкой в Clickhouse
+Напишем DAG, в рамках которого будет проверяться исходная таблица в Postgres на наличие новых данных, динамически создаваться задачи для обработки новых данных с последующей их агрегацией через Minio и загрузкой в Clickhouse
 
 ```bash
 touch airflow/dags/simulative_example_advanced_dag.py
@@ -678,7 +757,7 @@ touch airflow/dags/simulative_example_advanced_dag.py
 
 import datetime
 
-from airflow.decorators import task, task_group
+from airflow.decorators import task
 from airflow.models.dag import DAG
 
 
@@ -702,7 +781,7 @@ with DAG(
         from airflow.hooks.base import BaseHook
 
         query = "select min(updated_at) as dt from public.person"
-        query += " where updated_at >= now() - interval '1 minute';"
+        query += " where updated_at >= now() - interval '5 minute';"
 
         pg_conn = BaseHook.get_connection("postgres")
 
@@ -732,6 +811,20 @@ with DAG(
         import pandas as pd
         import psycopg2.extras
         from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+        from io import BytesIO
+
+        minio_conn = BaseHook.get_connection("minio")
+
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+        minio_client = Minio(
+            endpoint_url, access_key=minio_conn.login, secret_key=minio_conn.password, secure=False
+        )
+
+        if not minio_client.bucket_exists("mybucket"):
+            minio_client.make_bucket("mybucket")
 
         dt = ti.xcom_pull(key="dt")
 
@@ -760,59 +853,143 @@ with DAG(
         output = []
 
         for city in df["city"].unique():
-            output.append(df[df["city"] == city].to_json(date_format="iso"))
+            output.append(city)
+            data = df[df["city"] == city].to_json(date_format="iso")
+            data_json = json.dumps(data).encode("utf-8")
+            data_stream = BytesIO(data_json)
+            minio_client.put_object(
+                "mybucket", city, data_stream, len(data_json), content_type="application/json"
+            )
+
+        ti.xcom_push(key="mydata", value=output)
 
         print(f"Got {len(output)} groups of rows from PostgreSQL. Table: person")
 
         return output
 
-    @task_group(group_id="transform_data_and_aggregate")
-    def transform_data_and_aggregate(data):
+    @task
+    def transform_data(input):
+        import pandas as pd
+        from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+        from io import BytesIO
 
-        @task
-        def transform_data(data):
-            import json
-            import pandas as pd
+        minio_conn = BaseHook.get_connection("minio")
 
-            data = json.loads(data)
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
 
-            df = pd.DataFrame(data)
+        minio_client = Minio(
+            endpoint_url,
+            access_key=minio_conn.login,
+            secret_key=minio_conn.password,
+            secure=False,
+        )
 
-            print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+        item = minio_client.get_object("mybucket", input)
 
-            df = df.groupby("city").agg({"name": "count"}).reset_index().to_dict(orient="records")
+        json_data = json.loads(item.read().decode("utf-8"))
+        json_data = json.loads(json_data)
 
-            print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
+        print(json_data)
 
-            return df
+        print(type(json_data))
 
-        @task
-        def aggregate_data(data):
-            import pandas as pd
+        df = pd.DataFrame.from_dict(json_data, orient="index").T
 
-            dfs = []
+        print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
-            for sample in data:
-                dfs.append(pd.DataFrame.from_dict(sample, orient="index").T)
+        df = df.groupby("city").agg({"name": "count"}).reset_index().to_dict(orient="records")
 
-            df = pd.concat(dfs)
+        print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
 
-            print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+        output = df
+        data_json = json.dumps(output).encode("utf-8")
+        data_stream = BytesIO(data_json)
+        minio_client.put_object(
+            "mybucket",
+            f"{input}_groupped",
+            data_stream,
+            len(data_json),
+            content_type="application/json",
+        )
 
-            return df.to_json(date_format="iso")
-
-        t = transform_data(data)
-
-        a = aggregate_data(t)
-
-        return a
+        return f"{input}_groupped"
 
     @task
-    def load_data_to_ch(data):
+    def aggregate_data(input):
+        import pandas as pd
+        from airflow.hooks.base import BaseHook
+        from minio import Minio
         import json
+        from io import BytesIO
+
+        minio_conn = BaseHook.get_connection("minio")
+
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+        minio_client = Minio(
+            endpoint_url,
+            access_key=minio_conn.login,
+            secret_key=minio_conn.password,
+            secure=False,
+        )
+
+        print(input)
+
+        dfs = []
+
+        for city in input:
+
+            local_data = minio_client.get_object("mybucket", city)
+
+            json_data = json.load(BytesIO(local_data.read()))
+
+            df = pd.DataFrame(json_data)
+
+            dfs.append(df)
+
+        df = pd.concat(dfs)
+
+        print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+
+        output = df.to_json(date_format="iso")
+        data_json = json.dumps(output).encode("utf-8")
+        data_stream = BytesIO(data_json)
+        minio_client.put_object(
+            "mybucket",
+            "final",
+            data_stream,
+            len(data_json),
+            content_type="application/json",
+        )
+
+        return "final"
+
+    @task
+    def consolidator(input):
+        output = []
+
+        for i in range(len(input)):
+            output.append(input[i])
+
+        return output
+
+    @task
+    def load_data_to_ch(input):
         import pandas as pd
         from clickhouse_driver import Client
         from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+
+        minio_conn = BaseHook.get_connection("minio")
+
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+
+        minio_client = Minio(
+            endpoint_url, access_key=minio_conn.login, secret_key=minio_conn.password, secure=False
+        )
 
         ch_conn = BaseHook.get_connection("ch")
 
@@ -824,16 +1001,10 @@ with DAG(
             password=ch_conn.password,
         )
 
-        xcom_data = list(data)
-
-        dfs = []
-
-        for sample in xcom_data:
-            json_data = json.loads(sample)
-            df = pd.DataFrame.from_dict(json_data, orient="index").T
-            dfs.append(df)
-
-        df = pd.concat(dfs)
+        data = minio_client.get_object("mybucket", input)
+        json_data = json.loads(data.read().decode("utf-8"))
+        json_data = json.loads(json_data)
+        df = pd.DataFrame(json_data)
 
         client.insert_dataframe(
             "INSERT INTO person_count_by_city VALUES", df, settings={"use_numpy": True}
@@ -851,13 +1022,17 @@ with DAG(
 
     extract = get_data_from_pg()
 
-    transform = transform_data_and_aggregate.expand(data=extract)
+    transform = transform_data.expand(input=extract)
 
-    load = load_data_to_ch(transform)
+    consolidated_data = consolidator(transform)
+
+    aggregate = aggregate_data(consolidated_data)
+
+    load = load_data_to_ch(aggregate)
 
     sg = say_goodbye()
 
-    ph >> sensor >> extract >> transform >> load >> sg
+    ph >> sensor >> extract >> transform >> aggregate >> load >> sg
 ```
 
 С помощью UI мы можем видеть визуальное отображение нашего DAG
