@@ -464,7 +464,7 @@ touch init/ch/db.sql
 
     <users>
         <default>
-            <password>password</password>
+            <password></password>
             <profile>default</profile>
             <networks>
                 <ip>::/0</ip>
