@@ -1,6 +1,6 @@
 import datetime
 
-from airflow.decorators import task, task_group
+from airflow.decorators import task
 from airflow.models.dag import DAG
 
 
@@ -24,7 +24,7 @@ with DAG(
         from airflow.hooks.base import BaseHook
 
         query = "select min(updated_at) as dt from public.person"
-        query += " where updated_at >= now() - interval '1 minute';"
+        query += " where updated_at >= now() - interval '5 minute';"
 
         pg_conn = BaseHook.get_connection("postgres")
 
@@ -110,105 +110,113 @@ with DAG(
 
         return output
 
-    @task_group(group_id="transform_data_and_aggregate")
-    def transform_data_and_aggregate(data):
+    @task
+    def transform_data(input):
+        import pandas as pd
+        from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+        from io import BytesIO
 
-        @task
-        def transform_data(input):
-            import pandas as pd
-            from airflow.hooks.base import BaseHook
-            from minio import Minio
-            import json
-            from io import BytesIO
+        minio_conn = BaseHook.get_connection("minio")
 
-            minio_conn = BaseHook.get_connection("minio")
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
 
-            endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+        minio_client = Minio(
+            endpoint_url,
+            access_key=minio_conn.login,
+            secret_key=minio_conn.password,
+            secure=False,
+        )
 
-            minio_client = Minio(
-                endpoint_url,
-                access_key=minio_conn.login,
-                secret_key=minio_conn.password,
-                secure=False,
-            )
+        item = minio_client.get_object("mybucket", input)
 
-            item = minio_client.get_object("mybucket", input)
+        json_data = json.loads(item.read().decode("utf-8"))
+        json_data = json.loads(json_data)
 
-            json_data = json.loads(item.read().decode("utf-8"))
-            json_data = json.loads(json_data)
+        print(json_data)
 
-            print(json_data)
+        print(type(json_data))
 
-            print(type(json_data))
+        df = pd.DataFrame.from_dict(json_data, orient="index").T
 
-            df = pd.DataFrame.from_dict(json_data, orient="index").T
+        print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
-            print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+        df = df.groupby("city").agg({"name": "count"}).reset_index().to_dict(orient="records")
 
-            df = df.groupby("city").agg({"name": "count"}).reset_index().to_dict(orient="records")
+        print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
 
-            print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
+        output = df
+        data_json = json.dumps(output).encode("utf-8")
+        data_stream = BytesIO(data_json)
+        minio_client.put_object(
+            "mybucket",
+            f"{input}_groupped",
+            data_stream,
+            len(data_json),
+            content_type="application/json",
+        )
 
-            output = df
-            data_json = json.dumps(output).encode("utf-8")
-            data_stream = BytesIO(data_json)
-            minio_client.put_object(
-                "mybucket",
-                f"{input}_groupped",
-                data_stream,
-                len(data_json),
-                content_type="application/json",
-            )
+        return f"{input}_groupped"
 
-            return f"{input}_groupped"
+    @task
+    def aggregate_data(input):
+        import pandas as pd
+        from airflow.hooks.base import BaseHook
+        from minio import Minio
+        import json
+        from io import BytesIO
 
-        @task
-        def aggregate_data(input):
-            import pandas as pd
-            from airflow.hooks.base import BaseHook
-            from minio import Minio
-            import json
-            from io import BytesIO
+        minio_conn = BaseHook.get_connection("minio")
 
-            minio_conn = BaseHook.get_connection("minio")
+        endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
 
-            endpoint_url = json.loads(minio_conn.extra)["endpoint_url"]
+        minio_client = Minio(
+            endpoint_url,
+            access_key=minio_conn.login,
+            secret_key=minio_conn.password,
+            secure=False,
+        )
 
-            minio_client = Minio(
-                endpoint_url,
-                access_key=minio_conn.login,
-                secret_key=minio_conn.password,
-                secure=False,
-            )
+        print(input)
 
-            print(input)
+        dfs = []
 
-            local_data = minio_client.get_object("mybucket", input)
+        for city in input:
+
+            local_data = minio_client.get_object("mybucket", city)
 
             json_data = json.load(BytesIO(local_data.read()))
 
             df = pd.DataFrame(json_data)
 
-            print(f"Got {len(df)} rows from PostgreSQL. Table: person")
+            dfs.append(df)
 
-            output = df.to_json(date_format="iso")
-            data_json = json.dumps(output).encode("utf-8")
-            data_stream = BytesIO(data_json)
-            minio_client.put_object(
-                "mybucket",
-                f"{input}_final",
-                data_stream,
-                len(data_json),
-                content_type="application/json",
-            )
+        df = pd.concat(dfs)
 
-            return f"{input}_final"
+        print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
-        t = transform_data(data)
+        output = df.to_json(date_format="iso")
+        data_json = json.dumps(output).encode("utf-8")
+        data_stream = BytesIO(data_json)
+        minio_client.put_object(
+            "mybucket",
+            "final",
+            data_stream,
+            len(data_json),
+            content_type="application/json",
+        )
 
-        a = aggregate_data(t)
+        return "final"
 
-        return a
+    @task
+    def consolidator(input):
+        output = []
+
+        for i in range(len(input)):
+            output.append(input[i])
+
+        return output
 
     @task
     def load_data_to_ch(input):
@@ -236,18 +244,10 @@ with DAG(
             password=ch_conn.password,
         )
 
-        xcom_data = list(input)
-
-        dfs = []
-
-        for sample in xcom_data:
-            data = minio_client.get_object("mybucket", sample)
-            json_data = json.loads(data.read().decode("utf-8"))
-            json_data = json.loads(json_data)
-            df_local = pd.DataFrame(json_data)
-            dfs.append(df_local)
-
-        df = pd.concat(dfs)
+        data = minio_client.get_object("mybucket", input)
+        json_data = json.loads(data.read().decode("utf-8"))
+        json_data = json.loads(json_data)
+        df = pd.DataFrame(json_data)
 
         client.insert_dataframe(
             "INSERT INTO person_count_by_city VALUES", df, settings={"use_numpy": True}
@@ -265,10 +265,14 @@ with DAG(
 
     extract = get_data_from_pg()
 
-    transform = transform_data_and_aggregate.expand(data=extract)
+    transform = transform_data.expand(input=extract)
 
-    load = load_data_to_ch(transform)
+    consolidated_data = consolidator(transform)
+
+    aggregate = aggregate_data(consolidated_data)
+
+    load = load_data_to_ch(aggregate)
 
     sg = say_goodbye()
 
-    ph >> sensor >> extract >> transform >> load >> sg
+    ph >> sensor >> extract >> transform >> aggregate >> load >> sg
