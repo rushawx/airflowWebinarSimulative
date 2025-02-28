@@ -1,5 +1,7 @@
 # Simulative. Webinar: FastApi + Airflow + Postgres + Clickhouse
 
+[miro](https://miro.com/app/board/uXjVLn3nIQM=/?share_link_id=388365212080)
+
 ## 1. Подготовим окружение
 
 Создадим файл `.gitignore`
