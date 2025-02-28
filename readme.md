@@ -1,4 +1,4 @@
-# Simulative. Webinar: FastApi + Airflow + Postgres + Clickhouse
+# Simulative. Webinar: FastApi + Airflow + Postgres + Clickhouse + Minio
 
 [miro](https://miro.com/app/board/uXjVLn3nIQM=/?share_link_id=388365212080)
 
