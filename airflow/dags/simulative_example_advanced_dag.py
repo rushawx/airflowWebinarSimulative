@@ -102,7 +102,6 @@ with DAG(
     @task
     def transform_data(input):
         import json
-        from io import BytesIO
         import pandas as pd
         from utils import get_minio_client, write_data_to_minio
 
