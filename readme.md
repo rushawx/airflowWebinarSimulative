@@ -611,7 +611,67 @@ make up-af
 
 ![airflow_ui_dags.png](images/airflow_ui_dags.png)
 
-## 5. Напишем наш первый DAG с использованием PythonOperator, TaskGroup, XCOM
+## 5. Напишем наш первый DAG
+
+```bash
+touch airflow/dags/basic_dag.py
+```
+
+```python
+# airflow/dags/basic_dag.py
+
+import datetime
+
+from airflow.models.dag import DAG
+from airflow.operators.dummy import DummyOperator
+from airflow.decorators import task
+from airflow.sensors.sql import SqlSensor
+from airflow.sensors.external_task_sensor import ExternalTaskSensor
+
+
+with DAG(
+    dag_id="basic_dag",
+    schedule="0 18 * * *",
+    start_date=datetime.datetime(2025, 1, 1),
+    catchup=False,
+    tags=["simulative"],
+) as dag:
+
+    @task.bash
+    def bash_task():
+        return "echo https://airflow.apache.org/"
+
+    @task
+    def python_task():
+        print("Hello Python!")
+
+    bash_task = bash_task()
+
+    python_task = python_task()
+
+    sql_sensor = SqlSensor(
+        task_id='sql_check',
+        conn_id='postgres',
+        sql="""SELECT 1""",
+    )
+
+    external_sensor = ExternalTaskSensor(
+        task_id='external_check',
+        external_dag_id='simulative_example_basic_dag',
+        external_task_id='print_hello',
+        execution_date_fn=lambda dt: dt,
+        dag=dag
+    )
+
+    dummy_task = DummyOperator(task_id="dummy_task")
+
+    bash_task >> python_task >> [sql_sensor, external_sensor] >> dummy_task
+```
+
+С помощью UI мы можем видеть визуальное отображение нашего DAG, включающего Task Group
+![airflow_ui_dag.png](images/airflow_ui_dag.png)
+
+## 6. Напишем DAG с использованием PythonOperator, TaskGroup, XCOM
 
 Напишем DAG, в рамках которого будет происходить обращение к нашему сервису `fakerApi` для получения данных о пользователе, которые затем будут загружаться в Postgres
 
@@ -776,7 +836,7 @@ with DAG(
 С помощью UI мы можем видеть визуальное отображение нашего DAG, включающего Task Group
 ![airflow_ui_basic_dag.png](images/airflow_ui_basic_dag.png)
 
-## 5. Напишем продолжение нашего ETL процесса с использованием Dynamic Task Mapping
+## 7. Напишем продолжение нашего ETL процесса с использованием Dynamic Task Mapping
 
 Напишем DAG, в рамках которого будет проверяться исходная таблица в Postgres на наличие новых данных, динамически создаваться задачи для обработки новых данных с последующей их агрегацией через Minio и загрузкой в Clickhouse
 
@@ -1020,7 +1080,7 @@ with DAG(
 С помощью UI мы можем видеть визуальное отображение нашего DAG
 ![airflow_ui_advanced_dag.png](images/airflow_ui_advanced_dag.png)
 
-## 6. Пушим наши наработки на удаленный репозиторий
+## 8. Пушим наши наработки на удаленный репозиторий
 
 ```bash
 git remote add origin git@github.com:rushawx/airflowWebinarSimulative.git
