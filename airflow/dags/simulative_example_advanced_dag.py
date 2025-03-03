@@ -56,7 +56,6 @@ with DAG(
         from airflow.hooks.base import BaseHook
         from utils import get_minio_client, write_data_to_minio
 
-
         minio_client = get_minio_client()
 
         if not minio_client.bucket_exists("mybucket"):
@@ -105,7 +104,6 @@ with DAG(
         import pandas as pd
         from utils import get_minio_client, write_data_to_minio
 
-
         minio_client = get_minio_client()
 
         item = minio_client.get_object("mybucket", input)
@@ -117,12 +115,7 @@ with DAG(
 
         print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
-        df = (
-            df.groupby("city")
-            .agg({"name": "count"})
-            .reset_index()
-            .to_dict(orient="records")
-        )
+        df = df.groupby("city").agg({"name": "count"}).reset_index().to_dict(orient="records")
 
         print(f"Got {len(df)} rows after aggregation. Table: person_count_by_city")
 
@@ -136,7 +129,6 @@ with DAG(
         from io import BytesIO
         import pandas as pd
         from utils import get_minio_client, write_data_to_minio
-
 
         minio_client = get_minio_client()
 
@@ -179,7 +171,6 @@ with DAG(
         from clickhouse_driver import Client
         from airflow.hooks.base import BaseHook
         from utils import get_minio_client
-
 
         minio_client = get_minio_client()
 

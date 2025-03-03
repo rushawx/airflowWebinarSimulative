@@ -26,7 +26,6 @@ with DAG(
             from airflow.hooks.base import BaseHook
             from utils import get_minio_client
 
-
             minio_client = get_minio_client()
 
             if not minio_client.bucket_exists("mybucket"):
@@ -34,9 +33,7 @@ with DAG(
 
             faker_api_conn = BaseHook.get_connection("faker")
 
-            response = requests.get(
-                f"http://{faker_api_conn.host}:{faker_api_conn.port}/person"
-            )
+            response = requests.get(f"http://{faker_api_conn.host}:{faker_api_conn.port}/person")
 
             if response.status_code == 200:
                 data = response.json()
@@ -61,7 +58,6 @@ with DAG(
             import sqlalchemy
             from airflow.hooks.base import BaseHook
             from utils import get_minio_client
-
 
             data_id = ti.xcom_pull(key="mydata")
             print(data_id)

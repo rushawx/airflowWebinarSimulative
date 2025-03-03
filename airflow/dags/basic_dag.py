@@ -28,17 +28,17 @@ with DAG(
     python_task = python_task()
 
     sql_sensor = SqlSensor(
-        task_id='sql_check',
-        conn_id='postgres',
+        task_id="sql_check",
+        conn_id="postgres",
         sql="""SELECT 1""",
     )
 
     external_sensor = ExternalTaskSensor(
-        task_id='external_check',
-        external_dag_id='simulative_example_basic_dag',
-        external_task_id='print_hello',
+        task_id="external_check",
+        external_dag_id="simulative_example_basic_dag",
+        external_task_id="print_hello",
         execution_date_fn=lambda dt: dt,
-        dag=dag
+        dag=dag,
     )
 
     dummy_task = DummyOperator(task_id="dummy_task")
