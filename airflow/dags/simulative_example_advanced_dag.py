@@ -19,19 +19,13 @@ with DAG(
     @task
     def check_pg_for_new_data(ti):
         import time
-        import sqlalchemy
         import psycopg2.extras
-        from airflow.hooks.base import BaseHook
+        from utils import get_pg_engine
 
         query = "select min(updated_at) as dt from public.person"
         query += " where updated_at >= now() - interval '5 minute';"
 
-        pg_conn = BaseHook.get_connection("postgres")
-
-        dsn = f"postgresql://{pg_conn.login}:{pg_conn.password}@{pg_conn.host}"
-        dsn += f":{pg_conn.port}/{pg_conn.schema}"
-
-        pg_engine = sqlalchemy.create_engine(dsn)
+        pg_engine = get_pg_engine()
 
         conn = pg_engine.raw_connection()
 
@@ -39,7 +33,7 @@ with DAG(
             while True:
                 cur.execute(query)
                 data = cur.fetchone()
-                if data["dt"] is None:
+                if data.get("dt") is None:
                     print("No new data")
                     time.sleep(5)
                     continue
@@ -50,11 +44,9 @@ with DAG(
 
     @task
     def get_data_from_pg(ti):
-        import sqlalchemy
         import pandas as pd
         import psycopg2.extras
-        from airflow.hooks.base import BaseHook
-        from utils import get_minio_client, write_data_to_minio
+        from utils import get_minio_client, write_data_to_minio, get_pg_engine
 
         minio_client = get_minio_client()
 
@@ -63,12 +55,7 @@ with DAG(
 
         dt = ti.xcom_pull(key="dt")
 
-        pg_conn = BaseHook.get_connection("postgres")
-
-        dsn = f"postgresql://{pg_conn.login}:{pg_conn.password}@{pg_conn.host}"
-        dsn += f":{pg_conn.port}/{pg_conn.schema}"
-
-        pg_engine = sqlalchemy.create_engine(dsn)
+        pg_engine = get_pg_engine()
 
         conn = pg_engine.raw_connection()
 
@@ -79,8 +66,6 @@ with DAG(
         df = pd.DataFrame(data)
 
         print(f"Got {len(df)} rows from PostgreSQL. Table: person")
-
-        print(df.columns)
 
         df["id"] = df["id"].astype(str)
         df["city"] = df.apply(lambda row: row["address"].split(",")[0], axis=1)
@@ -124,6 +109,15 @@ with DAG(
         return f"{input}_groupped"
 
     @task
+    def consolidator(input):
+        output = []
+
+        for i in range(len(input)):
+            output.append(input[i])
+
+        return output
+
+    @task
     def aggregate_data(input):
         import json
         from io import BytesIO
@@ -151,46 +145,28 @@ with DAG(
         print(f"Got {len(df)} rows from PostgreSQL. Table: person")
 
         output = df.to_json(date_format="iso", orient="records")
+
         write_data_to_minio(minio_client, output, "final")
 
         return "final"
 
     @task
-    def consolidator(input):
-        output = []
-
-        for i in range(len(input)):
-            output.append(input[i])
-
-        return output
-
-    @task
     def load_data_to_ch(input):
         import json
         import pandas as pd
-        from clickhouse_driver import Client
-        from airflow.hooks.base import BaseHook
-        from utils import get_minio_client
+        from utils import get_minio_client, get_ch_client
 
         minio_client = get_minio_client()
 
-        ch_conn = BaseHook.get_connection("ch")
-
-        client = Client(
-            host=ch_conn.host,
-            port=ch_conn.port,
-            database=ch_conn.schema,
-            user=ch_conn.login,
-            password=ch_conn.password,
-        )
+        ch_client = get_ch_client()
 
         data = minio_client.get_object("mybucket", input)
         json_data = json.loads(data.read().decode("utf-8"))
         json_data = json.loads(json_data)
         df = pd.DataFrame(json_data)
 
-        client.insert_dataframe(
-            "INSERT INTO person_count_by_city VALUES", df, settings={"use_numpy": True}
+        ch_client.insert_dataframe(
+            "insert into person_count_by_city values", df, settings={"use_numpy": True}
         )
 
         print(f"Loaded {len(df)} rows to ClickHouse. Table: person_count_by_city")

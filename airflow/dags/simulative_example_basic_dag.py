@@ -18,6 +18,7 @@ with DAG(
 
     @task_group(group_id="read_data_from_faker_api_and_load_to_pg")
     def read_data_from_faker_api_and_load_to_pg():
+
         @task
         def read_data_from_faker_api(ti):
             import json
@@ -55,9 +56,7 @@ with DAG(
             import json
             from io import BytesIO
             import pandas as pd
-            import sqlalchemy
-            from airflow.hooks.base import BaseHook
-            from utils import get_minio_client
+            from utils import get_minio_client, get_pg_engine
 
             data_id = ti.xcom_pull(key="mydata")
             print(data_id)
@@ -68,16 +67,12 @@ with DAG(
 
             json_data = json.load(BytesIO(data.read()))
 
-            pg_conn = BaseHook.get_connection("postgres")
-
-            dsn = f"postgresql://{pg_conn.login}:{pg_conn.password}@{pg_conn.host}"
-            dsn += f":{pg_conn.port}/{pg_conn.schema}"
-
-            pg_engine = sqlalchemy.create_engine(dsn)
+            pg_engine = get_pg_engine()
 
             df = pd.DataFrame.from_dict(json_data, orient="index").T
 
             df.to_sql("person", pg_engine, if_exists="append", index=False)
+
             print(f"Loaded {len(df)} rows to PostgreSQL. Table: person")
 
         read = read_data_from_faker_api()
